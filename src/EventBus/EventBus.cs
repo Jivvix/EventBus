@@ -1,10 +1,13 @@
-// Edit file just to make PR to leave comments
 using System.Collections.Concurrent;
 using System.Reactive.Linq;
 using System.Reactive.Subjects;
 
 namespace EventBus;
 
+// Вроде бы, если <T> указывать в классе, то сообщение будет одного и того же типа для всех топиков. не знаю, можно ли так, но по идее если <T> указать на уровне метода, а не класса-интерфейса, то внутри одного EventBus'а можно будет реально разные типы складывать. В моём представлении тогда метод должен выглядеть, как public void Public<T>(T message, ...)
+// UPD: Хотя тогда будет непонятно что возвращать GetEventStream. В таком случае могу предложить оставить <T> на уровне класса, но добавить Publish<E : T> (ну или как тут наследование дженериков работает, если оно вообще есть). Насколько я понял, сейчас ты можешь отправлять ивенты только одного типа. В тестах ты посылаешь только строки, но надо бы проверить и другие типы данных.
+// В тестах можно проверить посылку строк и целых чисел, но тогда T будет просто равен Object, как общему объекту. Если хочется тестов по-серьёзнее, наверное стоит сделать класс Event, отнаследовать от него несколько ивентов, и попробовать послать каждый из них.
+// UPD 2: TopicData при таком подходе, по идее, тоже будет иметь <E : T>, и внутри себя использовать уже E
 public class EventBus<T> : IEventBus<T>
 {
     private class TopicData
@@ -18,8 +21,10 @@ public class EventBus<T> : IEventBus<T>
 
     private readonly ConcurrentDictionary<string, Lazy<TopicData>> _topics = new();
     private const LazyThreadSafetyMode LazyMode = LazyThreadSafetyMode.ExecutionAndPublication;
+// Думаю, вместо лока на воркеров, лучше использовать ConcurrentList (ну или что там есть)
     private readonly List<Task> _workers = [];
     private readonly Lock _workerLock = new();
+// А почему _disposed не bool? 
     private volatile int _disposed;
 
     public void Publish(T message, string topic = "default")
@@ -40,6 +45,8 @@ public class EventBus<T> : IEventBus<T>
         {
             while (topicData.Queue.IsEmpty && !topicData.IsDisposed)
             {
+// Действительно фигня какая-то с блокировкой очереди получается. Попробуй посмотреть на BlockingCollection, кажется, эта штука тебе больше подойдёт. BlockingCollection имеет метод Take который заблокируется, пока в коллекции не появятся элементы. Засчёт этого у тебя и цикл не будет крутиться вхолостую, и лишних локов быть не должно, да и TryDequeue можно избежать. Вероятно, придётся отловить исключения на случай dispose, но ты всё равно посмотри.
+// UPD: В BlockingCollection есть метод CompleteAdding, который можно вызывать в Dispose. Надо посмотреть, как этим пользоваться
                 lock (topicData.QueueLock)
                 {
                     Monitor.Wait(topicData.QueueLock);
@@ -49,6 +56,7 @@ public class EventBus<T> : IEventBus<T>
 
             while (topicData.Queue.TryDequeue(out var message))
             {
+// Чёт есть у меня подозрение, что не должно быть здесь лока. Думаю, можно вызывать просто OnNext, а потом обрабатывать исключения. В смысле это довольно редкий и какой-то некорректный сценарий, когда ты пытаешься обработать сообщение, а у тебя одновременно с этим закрывают брокер. На этот случай, как будто, и не стыдно потратиться на исключение, чтобы в остальных случаях без лочек всё быстрее работало.
                 lock (topicData.SubjectLock)
                 {
                     if (topicData.IsDisposed || topicData.Subject.IsDisposed) return;
@@ -75,6 +83,10 @@ public class EventBus<T> : IEventBus<T>
 
     private Lazy<TopicData> NewTopicData()
     {
+// Не-е, нефига, Lazy здесь не поможет, как я понял. Lazy используется для ресурсоёмких объектов, и гарантирует, что обращение к одному и тому же лейзи из разных потоков создаст только один объект. Здесь проблема в том, что сама функция может вызваться дважды, соответственно создастся два разных Lazy-объекта на один и тот же топик. Здесь, вероятно, придётся использовать lock опять.
+// Предлагаю идею, как я тебе рассказывал, через двойную проверку. Первая проверка осуществляет сама GetOrAdd, так что её прописывать не надо, а вот вторую проверку нужно осуществлять под локом. В локе на словарь проверить наличие ключа, если его нет - создать, если он есть - вернуть.
+// По идее этот метод имеет смысл использовать вместе с ConcurrentMap как раз из-за того, что этот лок происходит нечасто, только при создании топиков.
+// Хотя по мне оч странно, что сама ConcurrentMap, хоть и заточена под потокобезопасность, позволяетсоздавать два объекта под ключами. Какие-то они идиоты.
         return new Lazy<TopicData>(() =>
             {
                 var newTopicData = new TopicData();
