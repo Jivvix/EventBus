@@ -6,16 +6,35 @@ namespace EventBus;
 
 public class EventBus: IEventBus
 {
-    private class TopicData<T>
+    private interface ITopicData
+    {
+        object SubjectLock { get; }
+        void SetDisposed(bool isDisposed); //i'm not sure about this
+        void Complete();
+    }
+    private class TopicData<T> : ITopicData where T : IEvent
     {
         public BlockingCollection<T> Queue { get; } = new();
         //5public object QueueLock { get; } = new(); //for monitor wait and pulse
         public Subject<T> Subject { get; } = new();
         public object SubjectLock { get; } = new();
-        public volatile bool IsDisposed;
+        public volatile bool IsDisposed = false;
+
+        public void SetDisposed(bool isDisposed)
+        {
+            IsDisposed = isDisposed;
+        }
+
+        public void Complete()
+        {
+            lock (SubjectLock)
+            {
+                Subject.OnCompleted();
+            }
+        }
     }
 
-    private readonly ConcurrentDictionary<Type, object> _topics = new();
+    private readonly ConcurrentDictionary<Type, ITopicData> _topics = new();
     //private const LazyThreadSafetyMode LazyMode = LazyThreadSafetyMode.ExecutionAndPublication;
     private readonly ConcurrentQueue<Task> _workers = [];
     private volatile int _disposed;
@@ -25,14 +44,10 @@ public class EventBus: IEventBus
         ObjectDisposedException.ThrowIf(_disposed == 1, this);
         if (_topics.GetOrAdd(typeof(T), _ => NewTopicData<T>() ) is not TopicData<T> topicData) throw new InvalidCastException();
         topicData.Queue.Add(message);
-        // lock (topicData.QueueLock)
-        // {
-        //     Monitor.Pulse(topicData.QueueLock);
-        // }
     }
     
 
-    private static void ProcessQueue<T>(TopicData<T> topicData)
+    private static void ProcessQueue<T>(TopicData<T> topicData) where T : IEvent
     {
         while (!topicData.Queue.IsCompleted)
         {
@@ -40,11 +55,10 @@ public class EventBus: IEventBus
             try
             {
                 message = topicData.Queue.Take();
-                
             }
             catch (InvalidOperationException) { continue; }
 
-           topicData.Subject.OnNext(message);
+            topicData.Subject.OnNext(message);
             //Насколько я поняла, исключения в OnNext не должны перехватываться, для более прозрачной обработки
             //и дебага. Вообще, стоит избегать исключений в обработчиках сообщений, потому что одно исключение 
             //ведёт к неоднозначности, получат ли это сообщение другие обработчики, а также, потому что ни тот,
@@ -63,7 +77,7 @@ public class EventBus: IEventBus
         }
     }
 
-    private TopicData<T> NewTopicData<T>()
+    private TopicData<T> NewTopicData<T>() where T : IEvent
     {
         var newTopicData = new TopicData<T>();
         _workers.Enqueue(Task.Run(() => ProcessQueue(newTopicData)));
@@ -75,10 +89,10 @@ public class EventBus: IEventBus
         if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
         foreach (var pair in _topics)
         {
-            var topicData = pair.Value as TopicData<>;
+            var topicData = pair.Value;
             lock (topicData.SubjectLock)
             {
-                topicData.IsDisposed = true;
+                topicData.SetDisposed(true);
             }
         }
 
@@ -87,10 +101,10 @@ public class EventBus: IEventBus
         
         foreach (var pair in _topics)
         {
-            var topicData = pair.Value as TopicData<>;
+            var topicData = pair.Value;
             lock (topicData.SubjectLock)
             {
-                topicData.Subject.OnCompleted();
+                topicData.Complete();
                 //topicData.Subject.Dispose();
             }
         }
