@@ -4,67 +4,58 @@ using System.Reactive.Subjects;
 
 namespace EventBus;
 
-public class EventBus<T> : IEventBus<T>
+public class EventBus: IEventBus
 {
-    private class TopicData
+    private class TopicData<T>
     {
-        public ConcurrentQueue<T> Queue { get; } = new();
-        public object QueueLock { get; } = new(); //for monitor wait and pulse
+        public BlockingCollection<T> Queue { get; } = new();
+        //5public object QueueLock { get; } = new(); //for monitor wait and pulse
         public Subject<T> Subject { get; } = new();
         public object SubjectLock { get; } = new();
         public volatile bool IsDisposed;
     }
 
-    private readonly ConcurrentDictionary<string, Lazy<TopicData>> _topics = new();
-    private const LazyThreadSafetyMode LazyMode = LazyThreadSafetyMode.ExecutionAndPublication;
-    private readonly List<Task> _workers = [];
-    private readonly Lock _workerLock = new();
+    private readonly ConcurrentDictionary<Type, object> _topics = new();
+    //private const LazyThreadSafetyMode LazyMode = LazyThreadSafetyMode.ExecutionAndPublication;
+    private readonly ConcurrentQueue<Task> _workers = [];
     private volatile int _disposed;
 
-    public void Publish(T message, string topic = "default")
+    public void Publish<T>(T message) where T : IEvent
     {
         ObjectDisposedException.ThrowIf(_disposed == 1, this);
-        var topicData = _topics.GetOrAdd(topic, _ => NewTopicData() ).Value;
-        topicData.Queue.Enqueue(message);
-        lock (topicData.QueueLock)
-        {
-            Monitor.Pulse(topicData.QueueLock);
-        }
+        if (_topics.GetOrAdd(typeof(T), _ => NewTopicData<T>() ) is not TopicData<T> topicData) throw new InvalidCastException();
+        topicData.Queue.Add(message);
+        // lock (topicData.QueueLock)
+        // {
+        //     Monitor.Pulse(topicData.QueueLock);
+        // }
     }
     
 
-    private static void ProcessQueue(TopicData topicData)
+    private static void ProcessQueue<T>(TopicData<T> topicData)
     {
-        while (!topicData.IsDisposed)
+        while (!topicData.Queue.IsCompleted)
         {
-            while (topicData.Queue.IsEmpty && !topicData.IsDisposed)
+            T message;
+            try
             {
-                lock (topicData.QueueLock)
-                {
-                    Monitor.Wait(topicData.QueueLock);
-                }
-                if (topicData.IsDisposed) return;
+                message = topicData.Queue.Take();
+                
             }
+            catch (InvalidOperationException) { continue; }
 
-            while (topicData.Queue.TryDequeue(out var message))
-            {
-                lock (topicData.SubjectLock)
-                {
-                    if (topicData.IsDisposed || topicData.Subject.IsDisposed) return;
-                    topicData.Subject.OnNext(message);
-                    //Насколько я поняла, исключения в OnNext не должны перехватываться, для более прозрачной обработки
-                    //и дебага. Вообще, стоит избегать исключений в обработчиках сообщений, потому что одно исключение 
-                    //ведёт к неоднозначности, получат ли это сообщение другие обработчики, а также, потому что ни тот,
-                    //кто кидает ивенты, ни eventBus не должны знать, как их обрабатывать.
-                }
-            }
+           topicData.Subject.OnNext(message);
+            //Насколько я поняла, исключения в OnNext не должны перехватываться, для более прозрачной обработки
+            //и дебага. Вообще, стоит избегать исключений в обработчиках сообщений, потому что одно исключение 
+            //ведёт к неоднозначности, получат ли это сообщение другие обработчики, а также, потому что ни тот,
+            //кто кидает ивенты, ни eventBus не должны знать, как их обрабатывать.
         }
     }
 
-    public IObservable<T> GetEventStream(string topic = "default")
+    public IObservable<T> GetEventStream<T>() where T : IEvent
     {
         ObjectDisposedException.ThrowIf(_disposed == 1, this);
-        var topicData = _topics.GetOrAdd(topic, _ => NewTopicData()).Value;
+        if (_topics.GetOrAdd(typeof(T), _ => NewTopicData<T>() ) is not TopicData<T> topicData) throw new InvalidCastException();
         lock (topicData.SubjectLock)
         {
             ObjectDisposedException.ThrowIf(topicData.IsDisposed, topicData);
@@ -72,18 +63,11 @@ public class EventBus<T> : IEventBus<T>
         }
     }
 
-    private Lazy<TopicData> NewTopicData()
+    private TopicData<T> NewTopicData<T>()
     {
-        return new Lazy<TopicData>(() =>
-            {
-                var newTopicData = new TopicData();
-                lock (_workerLock)
-                {
-                    _workers.Add(Task.Run(() => ProcessQueue(newTopicData)));
-                }
-                return newTopicData;
-            }, 
-            LazyMode);
+        var newTopicData = new TopicData<T>();
+        _workers.Enqueue(Task.Run(() => ProcessQueue(newTopicData)));
+        return newTopicData;
     }
 
     public void Dispose()
@@ -91,31 +75,23 @@ public class EventBus<T> : IEventBus<T>
         if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
         foreach (var pair in _topics)
         {
-            var topicData = pair.Value.Value;
+            var topicData = pair.Value as TopicData<>;
             lock (topicData.SubjectLock)
             {
                 topicData.IsDisposed = true;
             }
-            lock (topicData.QueueLock)
-            {
-                Monitor.PulseAll(topicData.QueueLock);
-            }
         }
 
-        Task[] tasks;
-        lock (_workerLock)
-        {
-            tasks = _workers.ToArray();
-        }
+        var tasks = _workers.ToArray();
         Task.WaitAll(tasks);
         
         foreach (var pair in _topics)
         {
-            var topicData = pair.Value.Value;
+            var topicData = pair.Value as TopicData<>;
             lock (topicData.SubjectLock)
             {
                 topicData.Subject.OnCompleted();
-                topicData.Subject.Dispose();
+                //topicData.Subject.Dispose();
             }
         }
     }
