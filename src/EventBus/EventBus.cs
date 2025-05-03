@@ -18,11 +18,12 @@ public class EventBus: IEventBus
         //5public object QueueLock { get; } = new(); //for monitor wait and pulse
         public Subject<T> Subject { get; } = new();
         public object SubjectLock { get; } = new();
-        public volatile bool IsDisposed = false;
+        //public volatile bool IsDisposed = false;
 
         public void SetDisposed(bool isDisposed)
         {
-            IsDisposed = isDisposed;
+            Queue.CompleteAdding();
+            //IsDisposed = isDisposed;
         }
 
         public void Complete()
@@ -72,7 +73,7 @@ public class EventBus: IEventBus
         if (_topics.GetOrAdd(typeof(T), _ => NewTopicData<T>() ) is not TopicData<T> topicData) throw new InvalidCastException();
         lock (topicData.SubjectLock)
         {
-            ObjectDisposedException.ThrowIf(topicData.IsDisposed, topicData);
+            ObjectDisposedException.ThrowIf(topicData.Queue.IsCompleted, topicData);
             return topicData.Subject.AsObservable();
         }
     }
