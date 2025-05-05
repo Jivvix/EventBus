@@ -35,15 +35,15 @@ public class EventBus: IEventBus
         }
     }
 
-    private readonly ConcurrentDictionary<Type, ITopicData> _topics = new();
-    //private const LazyThreadSafetyMode LazyMode = LazyThreadSafetyMode.ExecutionAndPublication;
+    private readonly ConcurrentDictionary<Type, Lazy<ITopicData>> _topics = new();
+    private const LazyThreadSafetyMode LazyMode = LazyThreadSafetyMode.ExecutionAndPublication;
     private readonly ConcurrentQueue<Task> _workers = [];
     private volatile int _disposed;
 
     public void Publish<T>(T message) where T : IEvent
     {
         ObjectDisposedException.ThrowIf(_disposed == 1, this);
-        if (_topics.GetOrAdd(typeof(T), _ => NewTopicData<T>() ) is not TopicData<T> topicData) throw new InvalidCastException();
+        if (_topics.GetOrAdd(typeof(T), _ => NewTopicData<T>()).Value is not TopicData<T> topicData) throw new InvalidCastException();
         topicData.Queue.Add(message);
     }
     
@@ -70,7 +70,7 @@ public class EventBus: IEventBus
     public IObservable<T> GetEventStream<T>() where T : IEvent
     {
         ObjectDisposedException.ThrowIf(_disposed == 1, this);
-        if (_topics.GetOrAdd(typeof(T), _ => NewTopicData<T>() ) is not TopicData<T> topicData) throw new InvalidCastException();
+        if (_topics.GetOrAdd(typeof(T), _ => NewTopicData<T>() ).Value is not TopicData<T> topicData) throw new InvalidCastException();
         lock (topicData.SubjectLock)
         {
             ObjectDisposedException.ThrowIf(topicData.Queue.IsCompleted, topicData);
@@ -78,11 +78,15 @@ public class EventBus: IEventBus
         }
     }
 
-    private TopicData<T> NewTopicData<T>() where T : IEvent
+    private Lazy<ITopicData> NewTopicData<T>() where T : IEvent
     {
-        var newTopicData = new TopicData<T>();
-        _workers.Enqueue(Task.Run(() => ProcessQueue(newTopicData)));
-        return newTopicData;
+        return new Lazy<ITopicData>(() =>
+        {
+            var newTopicData = new TopicData<T>();
+            _workers.Enqueue(Task.Run(() => ProcessQueue(newTopicData)));
+            return newTopicData;
+        });
+
     }
 
     public void Dispose()
@@ -90,7 +94,7 @@ public class EventBus: IEventBus
         if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
         foreach (var pair in _topics)
         {
-            var topicData = pair.Value;
+            var topicData = pair.Value.Value;
             lock (topicData.SubjectLock)
             {
                 topicData.SetDisposed(true);
@@ -102,7 +106,7 @@ public class EventBus: IEventBus
         
         foreach (var pair in _topics)
         {
-            var topicData = pair.Value;
+            var topicData = pair.Value.Value;
             lock (topicData.SubjectLock)
             {
                 topicData.Complete();
