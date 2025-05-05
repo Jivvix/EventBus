@@ -32,7 +32,7 @@ public class EventBusTests
     {
        
         int receivedMessageCount = 0;
-        using var subscription = _eventBus.GetEventStream<SimpleEvent>().Subscribe(m => receivedMessageCount++);
+        using var subscription = _eventBus.GetEventStream<SimpleEvent>().Subscribe(_ => receivedMessageCount++);
         var simpleEvent = new SimpleEvent();
         _eventBus.Publish(simpleEvent);
 
@@ -56,7 +56,7 @@ public class EventBusTests
         var receivedStrings = new List<string>();
         var receivedSimpleEvent = 0;
 
-        using var sub1 = _eventBus.GetEventStream<SimpleEvent>().Subscribe(m => receivedSimpleEvent++);
+        using var sub1 = _eventBus.GetEventStream<SimpleEvent>().Subscribe(_ => receivedSimpleEvent++);
         using var sub2 = _eventBus.GetEventStream<StringEvent>().Subscribe(m => receivedStrings.Add(m.Text));
 
         _eventBus.Publish(stringEvent);
@@ -124,6 +124,29 @@ public class EventBusTests
         var expected = Enumerable.Range(0, messageCount)
             .Select(i => $"Message {i}");
         Assert.That(receivedMessages, Has.Count.EqualTo(messageCount));
+        Assert.That(receivedMessages, Is.EquivalentTo(expected));
+    }
+    private class CustomStringEvent(string text) : StringEvent(text)
+    {
+        public void SetString(string newText)
+        {
+            Text = newText;
+        }
+    }
+
+    private class ComplexStringEvent(string text) : StringEvent(text);
+    [Test] public void DifferentTypesAsInterface_ShouldReceiveAllMessages()
+    {
+        var receivedMessages = new List<string>();
+        using var subscription = _eventBus.GetEventStream<StringEvent>().Subscribe(msg => receivedMessages.Add(msg.Text));
+        var customEvent = new CustomStringEvent("Test string");
+        customEvent.SetString("2");
+        _eventBus.Publish<StringEvent>( new ComplexStringEvent("1"));
+        _eventBus.Publish<StringEvent>(customEvent);
+
+        Thread.Sleep(100);
+        string[] expected = ["1", "2"];
+        Assert.That(receivedMessages, Has.Count.EqualTo(2));
         Assert.That(receivedMessages, Is.EquivalentTo(expected));
     }
 }
