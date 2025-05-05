@@ -1,23 +1,28 @@
 namespace EventBus;
 
-public interface IEventBus<T> : IDisposable
+/// <summary>
+/// Передаёт ивенты (классы, наследующиеся от IEvent). Отдельная подписка и отдельная очередь для каждого типа ивентов.
+/// Чтобы получать разные классы ивентов из одной очереди, нужно их отнаследовать от общего родителя и указывать его тип
+/// в методах.
+/// </summary>
+public interface IEventBus : IDisposable
 {
     /// <summary>
-    /// Публикует сообщение в указанный топик. Если топик не был создан ранее, то создаёт его.
+    /// Публикует сообщение соответствующегоо типа.
     /// </summary>
     /// <param name="message">Сообщение для публикации.</param>
-    /// <param name="topic">Имя топика (канала). Если не указывать, то публикуется в топик по умолчанию</param>
+    /// <typeparam name="T">Тип сообщения для передачи</typeparam>
     /// <exception cref="ObjectDisposedException"> Если EventBroker is disposed</exception>
-    void Publish(T message, string topic = "default");
+    void Publish<T>(T message)  where T : IEvent;
 
 
     /// <summary>
-    /// Возвращает поток событий для указанного топика. Если топик не был создан ранее, то создаёт его.
-    /// Избегайте бросания исключений в подписчиках, так как это ведёт к неопределённости, кто их будет ловить и
+    /// Возвращает поток событий указанного типа.
+    /// Избегайте бросать исключений в подписчиках, так как это ведёт к неопределённости, кто их будет ловить и
     /// обрабатывать.
     /// </summary>
-    /// <param name="topic">Имя топика. Если не указано, то используется топик по умолчанию.</param>
+    /// <typeparam name="T">Тип получаемых сообщений</typeparam>
     /// <returns>IObservable поток сообщений типа T.</returns>
     /// <exception cref="ObjectDisposedException">Если EventBroker is disposed или топик is disposed</exception>
-    IObservable<T> GetEventStream(string topic = "default");
+    IObservable<T> GetEventStream<T>()  where T : IEvent;
 }

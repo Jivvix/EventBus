@@ -2,15 +2,23 @@ using EventBus;
 
 namespace EventBusTests;
 
+
+
 [TestFixture]
 public class EventBusTests
 {
-    private IEventBus<string> _eventBus;
+    private class SimpleEvent : IEvent {}
+
+    private class StringEvent(string text) : IEvent
+    {
+        public string Text { get; set; } = text;
+    }
+    private IEventBus _eventBus;
 
     [SetUp]
     public void Setup()
     {
-        _eventBus = new EventBus<string>();
+        _eventBus = new EventBus.EventBus();
     }
 
     [TearDown]
@@ -20,100 +28,83 @@ public class EventBusTests
     }
 
     [Test]
-    public void Publish_ShouldDeliverMessageToSubscriber_DefaultTopic()
+    public void Publish_ShouldDeliverMessageToSubscriber()
     {
-        const string message = "Test message";
-        var receivedMessage = string.Empty;
-        using var subscription = _eventBus.GetEventStream().Subscribe(m => receivedMessage = m);
-
-        _eventBus.Publish(message);
+       
+        int receivedMessageCount = 0;
+        using var subscription = _eventBus.GetEventStream<SimpleEvent>().Subscribe(_ => receivedMessageCount++);
+        var simpleEvent = new SimpleEvent();
+        _eventBus.Publish(simpleEvent);
 
         Thread.Sleep(100);
-        Assert.That(receivedMessage, Is.EqualTo(message));
+        Assert.That(receivedMessageCount, Is.EqualTo(1));
     }
 
     [Test]
-    public void Publish_ShouldDeliverMessageToSubscriber_CustomTopic()
+    public void GetEventStream_ShouldReturnObservableForRequestedType()
     {
-        const string message = "Test message";
-        const string topic = "custom-topic";
-        var receivedMessage = string.Empty;
-        using var subscription = _eventBus.GetEventStream(topic).Subscribe(m => receivedMessage = m);
-
-        _eventBus.Publish(message, topic);
-
-        Thread.Sleep(100);
-        Assert.That(receivedMessage, Is.EqualTo(message));
-    }
-
-    [Test]
-    public void GetEventStream_ShouldReturnObservableForRequestedTopic()
-    {
-        const string topic = "test-topic";
-
-        var observable = _eventBus.GetEventStream(topic);
+        var observable = _eventBus.GetEventStream<SimpleEvent>();
 
         Assert.That(observable, Is.Not.Null);
-        Assert.That(observable, Is.InstanceOf<IObservable<string>>());
+        Assert.That(observable, Is.InstanceOf<IObservable<SimpleEvent>>());
     }
 
     [Test]
-    public void Publish_ShouldNotDeliverMessageToDifferentTopicSubscribers()
+    public void Publish_ShouldNotDeliverMessageToDifferentTypeSubscribers()
     {
-        const string message = "Test message";
-        const string topic1 = "topic1";
-        const string topic2 = "topic2";
-        var receivedMessages = new List<string>();
+        var stringEvent = new StringEvent("Test string");
+        var receivedStrings = new List<string>();
+        var receivedSimpleEvent = 0;
 
-        using var sub1 = _eventBus.GetEventStream(topic1).Subscribe(m => receivedMessages.Add("topic1:" + m));
-        using var sub2 = _eventBus.GetEventStream(topic2).Subscribe(m => receivedMessages.Add("topic2:" + m));
+        using var sub1 = _eventBus.GetEventStream<SimpleEvent>().Subscribe(_ => receivedSimpleEvent++);
+        using var sub2 = _eventBus.GetEventStream<StringEvent>().Subscribe(m => receivedStrings.Add(m.Text));
 
-        _eventBus.Publish(message, topic1);
+        _eventBus.Publish(stringEvent);
 
         Thread.Sleep(100);
-        Assert.That(receivedMessages.Count, Is.EqualTo(1));
-        Assert.That(receivedMessages[0], Is.EqualTo("topic1:" + message));
+        Assert.That(receivedSimpleEvent, Is.EqualTo(0));
+        Assert.That(receivedStrings.Count, Is.EqualTo(1));
+        Assert.That(receivedStrings[0], Is.EqualTo("Test string"));
     }
 
     [Test]
     public void Dispose_ShouldCompleteSubscriber()
     {
-        var eventBus = new EventBus<string>();
+        var eventBus = new EventBus.EventBus();
         var isCompleted = false;
-        using var subscription = eventBus.GetEventStream()
+        using var subscription = eventBus.GetEventStream<SimpleEvent>()
             .Subscribe(_ => { }, () => isCompleted = true);
         eventBus.Dispose();
-
         Assert.That(isCompleted, Is.True);
     }
 
     [Test]
     public void Publish_AfterDispose_ShouldThrowObjectDisposedException()
     {
-        var eventBus = new EventBus<string>();
+        var eventBus = new EventBus.EventBus();
         eventBus.Dispose();
-
-        Assert.Throws<ObjectDisposedException>(() => eventBus.Publish("test"));
+        var simpleEvent = new SimpleEvent();
+        Assert.Throws<ObjectDisposedException>(() => eventBus.Publish(simpleEvent));
     }
 
     [Test]
     public void GetEventStream_AfterDispose_ShouldThrowObjectDisposedException()
     {
-        var eventBus = new EventBus<string>();
+        var eventBus = new EventBus.EventBus();
         eventBus.Dispose();
 
-        Assert.Throws<ObjectDisposedException>(() => eventBus.GetEventStream());
+        Assert.Throws<ObjectDisposedException>(() => eventBus.GetEventStream<SimpleEvent>());
     }
 
     [Test]
     public void MultipleSubscribers_ShouldAllReceiveMessages()
     {
-        const string message = "Test message";
+        var stringEvent = new StringEvent("Test string");
         var receivedCount = 0;
-        using var sub1 = _eventBus.GetEventStream().Subscribe(_ => Interlocked.Increment(ref receivedCount));
-        using var sub2 = _eventBus.GetEventStream().Subscribe(_ => Interlocked.Increment(ref receivedCount));
+        using var sub1 = _eventBus.GetEventStream<StringEvent>().Subscribe(_ => Interlocked.Increment(ref receivedCount));
+        using var sub2 = _eventBus.GetEventStream<StringEvent>().Subscribe(_ => Interlocked.Increment(ref receivedCount));
 
-        _eventBus.Publish(message);
+        _eventBus.Publish(stringEvent);
 
         Thread.Sleep(100);
         Assert.That(receivedCount, Is.EqualTo(2));
@@ -125,14 +116,37 @@ public class EventBusTests
     {
         const int messageCount = 1000;
         var receivedMessages = new List<string>();
-        using var subscription = _eventBus.GetEventStream().Subscribe(msg => receivedMessages.Add(msg));
+        using var subscription = _eventBus.GetEventStream<StringEvent>().Subscribe(msg => receivedMessages.Add(msg.Text));
         
-        Parallel.For(0, messageCount, i => _eventBus.Publish($"Message {i}"));
+        Parallel.For(0, messageCount, i => _eventBus.Publish(new StringEvent($"Message {i}")) );
 
         await Task.Delay(500);
         var expected = Enumerable.Range(0, messageCount)
             .Select(i => $"Message {i}");
         Assert.That(receivedMessages, Has.Count.EqualTo(messageCount));
+        Assert.That(receivedMessages, Is.EquivalentTo(expected));
+    }
+    private class CustomStringEvent(string text) : StringEvent(text)
+    {
+        public void SetString(string newText)
+        {
+            Text = newText;
+        }
+    }
+
+    private class ComplexStringEvent(string text) : StringEvent(text);
+    [Test] public void DifferentTypesAsInterface_ShouldReceiveAllMessages()
+    {
+        var receivedMessages = new List<string>();
+        using var subscription = _eventBus.GetEventStream<StringEvent>().Subscribe(msg => receivedMessages.Add(msg.Text));
+        var customEvent = new CustomStringEvent("Test string");
+        customEvent.SetString("2");
+        _eventBus.Publish<StringEvent>( new ComplexStringEvent("1"));
+        _eventBus.Publish<StringEvent>(customEvent);
+
+        Thread.Sleep(100);
+        string[] expected = ["1", "2"];
+        Assert.That(receivedMessages, Has.Count.EqualTo(2));
         Assert.That(receivedMessages, Is.EquivalentTo(expected));
     }
 }
